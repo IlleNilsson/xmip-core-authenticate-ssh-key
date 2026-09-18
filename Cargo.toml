@@ -21,6 +21,26 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+# A Technology depends on its parent Capability, never the reverse
+# (repository-model.md): authenticate for the trait and Presented, context
+# for Verified, xcore for the mechanism catalog.
+authenticate = { package = "xmip-core-authenticate", git = "https://github.com/IlleNilsson/xmip-core-authenticate", branch = "main" }
+context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main" }
+xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
+# The three key types RFC 8709, RFC 5656 and RFC 8332 give SSH: Ed25519,
+# ECDSA on nistp256, RSA with SHA-256. sha2 for the fingerprint, base64 for
+# the authorized_keys line and the proofs.
+ed25519-dalek = "2"
+p256 = { version = "0.13", features = ["ecdsa"] }
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+# The tests generate keys.
+rand = "0.8"
+
 [lints.rust]
 # forbid, not deny: a module has no business writing unsafe. The one exception
 # in the estate is xmip-core-abi, which holds the extern "C" vtable over
