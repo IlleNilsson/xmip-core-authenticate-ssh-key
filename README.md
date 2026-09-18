@@ -3,10 +3,12 @@
 Authenticate by ssh-key: verifies a signature over a challenge by the presented key. A technology of
 [xmip-core-authenticate](https://github.com/IlleNilsson/xmip-core-authenticate).
 
-Declared and not yet written; `architecture.toml` carries the maturity. When
-it is written it implements `Authenticator`, one mechanism at one gate (ADR-0050).
-What it may depend on is `repository-model.md` section 4 and ADR-0044: its
-capability, and no sibling.
+It finds the presented key, by its SHA-256 fingerprint, among the
+`authorized_keys` lines the node holds, and verifies the SSH signature blob
+over the signed session data with it: `ssh-ed25519`, `ecdsa-sha2-nistp256` and
+`rsa-sha2-256`. It refuses `ssh-rsa` (SHA-1), `rsa-sha2-512`, the other curves,
+certificates and `sk-` keys by name, and it does not rebuild the RFC 4252
+signed data: the transport reports exactly what was signed.
 
 ## Toolchain
 
