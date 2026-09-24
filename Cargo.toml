@@ -26,6 +26,9 @@ path = "src/lib.rs"
 # (repository-model.md): authenticate for the trait and Presented, context
 # for Verified, xcore for the mechanism catalog.
 authenticate = { package = "xmip-core-authenticate", git = "https://github.com/IlleNilsson/xmip-core-authenticate", branch = "main" }
+# identify for the names a claim carries across the gates (identify::evidence),
+# declared once for the first gate that writes them and this one that reads.
+identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
 context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main" }
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 # The three key types RFC 8709, RFC 5656 and RFC 8332 give SSH: Ed25519,
@@ -35,7 +38,8 @@ ed25519-dalek = "2"
 p256 = { version = "0.13", features = ["ecdsa"] }
 rsa = { version = "0.9", features = ["sha2"] }
 sha2 = "0.10"
-base64 = "0.22"
+# The estate's encoding primitives: the byte cursor the SSH wire encoding is read over.
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 
 [dev-dependencies]
 # The tests generate keys.

@@ -15,10 +15,9 @@
 //! refused: they narrow what the key may do, this gate cannot enforce them,
 //! and honoring the key while ignoring them would widen it silently.
 
-use crate::wire::{Reader, padded};
+use crate::wire::{Ssh, padded};
 use authenticate::AuthenticateError;
-use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use codec::cursor::Cursor;
 use rsa::signature::Verifier as _;
 use sha2::{Digest, Sha256};
 
@@ -62,12 +61,12 @@ impl AuthorizedKey {
         }
         let blob = words
             .next()
-            .and_then(|encoded| STANDARD.decode(encoded).ok())
+            .and_then(|encoded| codec::base64::decode(encoded).ok())
             .ok_or_else(|| AuthenticateError::new("the authorized key's blob is not base64"))?;
         let comment = words.collect::<Vec<_>>().join(" ");
 
-        let mut reader = Reader::over(&blob, "key blob");
-        let inner = reader.text()?;
+        let mut reader = Cursor::new(&blob);
+        let inner = reader.text(KEY_BLOB)?;
         if inner != named {
             return Err(AuthenticateError::new(format!(
                 "the authorized key line says {named} and its blob says {inner}"
@@ -121,7 +120,7 @@ impl AuthorizedKey {
     pub fn fingerprint(&self) -> String {
         format!(
             "SHA256:{}",
-            STANDARD_NO_PAD.encode(Sha256::digest(&self.blob))
+            codec::base64::encode_unpadded(&Sha256::digest(&self.blob))
         )
     }
 
@@ -132,16 +131,19 @@ impl AuthorizedKey {
     /// Where the blob's algorithm is not one this key makes or not one this
     /// gate verifies, the signature is malformed, or it does not verify.
     pub fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), AuthenticateError> {
-        let mut reader = Reader::over(signature, "signature blob");
-        let algorithm = reader.text()?;
-        let raw = reader.string()?;
+        let mut reader = Cursor::new(signature);
+        let algorithm = reader.text("signature blob")?;
+        let raw = reader.string("signature blob")?;
 
         let holds = match (&self.material, algorithm) {
             (Material::Ed25519(key), ED25519) => ed25519_dalek::Signature::from_slice(raw)
                 .is_ok_and(|signature| key.verify_strict(data, &signature).is_ok()),
             (Material::P256(key), ECDSA_P256) => {
-                let mut pair = Reader::over(raw, "ECDSA signature");
-                let (r, s) = (pair.mpint()?, pair.mpint()?);
+                let mut pair = Cursor::new(raw);
+                let (r, s) = (
+                    pair.mpint("ECDSA signature")?,
+                    pair.mpint("ECDSA signature")?,
+                );
                 match (padded::<32>(r), padded::<32>(s)) {
                     (Some(r), Some(s)) => p256::ecdsa::Signature::from_scalars(r, s)
                         .is_ok_and(|signature| key.verify(data, &signature).is_ok()),
@@ -182,9 +184,12 @@ impl AuthorizedKey {
     }
 }
 
-fn ed25519(reader: &mut Reader<'_>) -> Result<Material, AuthenticateError> {
+/// What a key blob is called in a refusal.
+const KEY_BLOB: &str = "key blob";
+
+fn ed25519(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
     let bytes: &[u8; 32] = reader
-        .string()?
+        .string(KEY_BLOB)?
         .try_into()
         .map_err(|_| AuthenticateError::new("an Ed25519 key is thirty-two bytes"))?;
     ed25519_dalek::VerifyingKey::from_bytes(bytes)
@@ -192,20 +197,20 @@ fn ed25519(reader: &mut Reader<'_>) -> Result<Material, AuthenticateError> {
         .map_err(|_| AuthenticateError::new("the Ed25519 key is not a point on the curve"))
 }
 
-fn p256_point(reader: &mut Reader<'_>) -> Result<Material, AuthenticateError> {
-    let curve = reader.text()?;
+fn p256_point(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
+    let curve = reader.text(KEY_BLOB)?;
     if curve != "nistp256" {
         return Err(AuthenticateError::new(format!(
             "the ECDSA key's curve is '{curve}' and this node verifies nistp256"
         )));
     }
-    p256::ecdsa::VerifyingKey::from_sec1_bytes(reader.string()?)
+    p256::ecdsa::VerifyingKey::from_sec1_bytes(reader.string(KEY_BLOB)?)
         .map(Material::P256)
         .map_err(|_| AuthenticateError::new("the ECDSA key is not a point on nistp256"))
 }
 
-fn rsa_key(reader: &mut Reader<'_>) -> Result<Material, AuthenticateError> {
-    let (exponent, modulus) = (reader.mpint()?, reader.mpint()?);
+fn rsa_key(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
+    let (exponent, modulus) = (reader.mpint(KEY_BLOB)?, reader.mpint(KEY_BLOB)?);
     rsa::RsaPublicKey::new(
         rsa::BigUint::from_bytes_be(modulus),
         rsa::BigUint::from_bytes_be(exponent),
@@ -226,7 +231,10 @@ pub(crate) mod tests {
         let mut blob = Vec::new();
         put(&mut blob, ED25519.as_bytes());
         put(&mut blob, signing.verifying_key().as_bytes());
-        let line = format!("{ED25519} {} partner-x@example", STANDARD.encode(blob));
+        let line = format!(
+            "{ED25519} {} partner-x@example",
+            codec::base64::encode(&blob)
+        );
         (signing, line)
     }
 
@@ -263,7 +271,7 @@ pub(crate) mod tests {
             &mut blob,
             signing.verifying_key().to_encoded_point(false).as_bytes(),
         );
-        let key = AuthorizedKey::parse(&format!("{ECDSA_P256} {}", STANDARD.encode(blob)))
+        let key = AuthorizedKey::parse(&format!("{ECDSA_P256} {}", codec::base64::encode(&blob)))
             .expect("a key");
         let signature: p256::ecdsa::Signature = signing.sign(b"session");
         let (r, s) = signature.split_bytes();
@@ -290,7 +298,8 @@ pub(crate) mod tests {
         put(&mut blob, RSA.as_bytes());
         put_mpint(&mut blob, &private.e().to_bytes_be());
         put_mpint(&mut blob, &private.n().to_bytes_be());
-        let key = AuthorizedKey::parse(&format!("{RSA} {}", STANDARD.encode(blob))).expect("key");
+        let key =
+            AuthorizedKey::parse(&format!("{RSA} {}", codec::base64::encode(&blob))).expect("key");
         let signer = rsa::pkcs1v15::SigningKey::<Sha256>::new(private);
         let raw = signer.sign(b"session").to_vec();
 
