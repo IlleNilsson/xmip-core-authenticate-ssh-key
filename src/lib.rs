@@ -35,29 +35,18 @@ pub mod wire;
 pub use key::AuthorizedKey;
 
 use authenticate::{AuthenticateError, Authenticator, Presented};
-use base64::Engine;
-use base64::alphabet;
-use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+use codec::cursor::Cursor;
 use context::Verified;
-use wire::Reader;
+use identify::evidence;
+use wire::Ssh;
 use xcore::{Mechanism, mechanism};
 
-/// The proof the identify sibling attaches the signature blob under, base64.
-pub const SIGNATURE_PROOF: &str = "ssh-key.signature";
-/// The proof the identify sibling attaches the signed session bytes under.
-pub const SESSION_PROOF: &str = "ssh-key.session";
 /// The evidence a transport reports the SSH user name under, where the
 /// session bytes do not carry it.
 pub const USER: &str = "ssh.user";
 
 /// `SSH_MSG_USERAUTH_REQUEST`, RFC 4252 section 6.
 const USERAUTH_REQUEST: u8 = 50;
-
-/// Standard base64, padded or not: transports differ.
-const BASE64: GeneralPurpose = GeneralPurpose::new(
-    &alphabet::STANDARD,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
-);
 
 /// The ssh-key authenticator: the keys the node holds as authorized.
 #[derive(Clone, Debug)]
@@ -75,18 +64,18 @@ impl<'a> Signed<'a> {
     /// The signed data read as RFC 4252 section 7, or `None` where the
     /// bytes are not of that shape and are an opaque challenge.
     fn read(data: &'a [u8]) -> Option<Self> {
-        let mut reader = Reader::over(data, "signed data");
-        reader.string().ok()?;
+        let (mut reader, what) = (Cursor::new(data), "signed data");
+        reader.string(what).ok()?;
         if reader.byte().ok()? != USERAUTH_REQUEST {
             return None;
         }
-        let user = reader.text().ok()?;
-        reader.string().ok()?;
-        if reader.text().ok()? != "publickey" || reader.byte().ok()? != 1 {
+        let user = reader.text(what).ok()?;
+        reader.string(what).ok()?;
+        if reader.text(what).ok()? != "publickey" || reader.byte().ok()? != 1 {
             return None;
         }
-        reader.string().ok()?;
-        let blob = reader.string().ok()?;
+        reader.string(what).ok()?;
+        let blob = reader.string(what).ok()?;
         reader.is_empty().then_some(Self { user, blob })
     }
 }
@@ -124,8 +113,7 @@ fn proof(presented: &Presented, name: &str) -> Result<Vec<u8>, AuthenticateError
     let encoded = presented
         .proof(name)
         .ok_or_else(|| AuthenticateError::new(format!("no {name} proof was presented")))?;
-    BASE64
-        .decode(encoded.trim())
+    codec::base64::decode(encoded.trim())
         .map_err(|_| AuthenticateError::new(format!("the {name} proof is not base64")))
 }
 
@@ -141,8 +129,8 @@ impl Authenticator for Verifier {
                 "'{name}' was presented and this authenticator verifies ssh-key"
             )));
         }
-        let signature = proof(presented, SIGNATURE_PROOF)?;
-        let session = proof(presented, SESSION_PROOF)?;
+        let signature = proof(presented, evidence::SSH_KEY_SIGNATURE)?;
+        let session = proof(presented, evidence::SSH_KEY_SESSION)?;
 
         let claimed = presented.value.trim().trim_end_matches('=');
         let key = self
@@ -211,8 +199,11 @@ mod tests {
     fn presented(fingerprint: &str, data: &[u8], signing: &ed25519_dalek::SigningKey) -> Presented {
         let signature = signature_blob("ssh-ed25519", &signing.sign(data).to_bytes());
         Presented::passed(mechanism::ssh_key(), fingerprint)
-            .with_proof(SIGNATURE_PROOF, BASE64.encode(signature))
-            .with_proof(SESSION_PROOF, BASE64.encode(data))
+            .with_proof(
+                evidence::SSH_KEY_SIGNATURE,
+                codec::base64::encode(&signature),
+            )
+            .with_proof(evidence::SSH_KEY_SESSION, codec::base64::encode(data))
     }
 
     #[test]
@@ -312,7 +303,7 @@ mod tests {
         let gate = Verifier::from_authorized_keys(&line).expect("keys");
         let other = Presented::passed(mechanism::certificate(), "CN=x");
         let bare = Presented::passed(mechanism::ssh_key(), "SHA256:x");
-        let half = bare.clone().with_proof(SIGNATURE_PROOF, "c2ln");
+        let half = bare.clone().with_proof(evidence::SSH_KEY_SIGNATURE, "c2ln");
 
         assert!(
             gate.verify(&other)
