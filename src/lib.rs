@@ -34,16 +34,14 @@ pub mod wire;
 
 pub use key::AuthorizedKey;
 
-use authenticate::{AuthenticateError, Authenticator, Presented};
+use authenticate::{AuthenticateError, Authenticator};
 use codec::cursor::Cursor;
 use context::Verified;
+use context::property::SSH_USER;
+use identify::Presented;
 use identify::evidence;
 use wire::Ssh;
 use xcore::{Mechanism, mechanism};
-
-/// The evidence a transport reports the SSH user name under, where the
-/// session bytes do not carry it.
-pub const USER: &str = "ssh.user";
 
 /// `SSH_MSG_USERAUTH_REQUEST`, RFC 4252 section 6.
 const USERAUTH_REQUEST: u8 = 50;
@@ -155,7 +153,7 @@ impl Authenticator for Verifier {
             presented
                 .evidence
                 .iter()
-                .find(|(name, _)| name == USER)
+                .find(|(name, _)| name == SSH_USER)
                 .map(|(_, user)| user.as_str())
         });
         if let Some(only) = key.user()
@@ -165,7 +163,7 @@ impl Authenticator for Verifier {
                 Some(user) => format!("the key is authorized for '{only}' and not for '{user}'"),
                 None => format!(
                     "the key is authorized for '{only}' only, and neither the signed data \
-                     nor {USER} evidence names the user"
+                     nor {SSH_USER} evidence names the user"
                 ),
             }));
         }
@@ -270,7 +268,7 @@ mod tests {
             .verify(&presented(&fingerprint, b"a challenge", &signing))
             .expect_err("refused");
         let reported =
-            presented(&fingerprint, b"a challenge", &signing).with_evidence(USER, "orders");
+            presented(&fingerprint, b"a challenge", &signing).with_evidence(SSH_USER, "orders");
 
         assert_eq!(proven.expect("proven"), Verified::Proven);
         assert!(other.message.contains("not for 'root'"));
