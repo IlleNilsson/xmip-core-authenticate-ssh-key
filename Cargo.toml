@@ -40,6 +40,9 @@ rsa = { version = "0.9", features = ["sha2"] }
 sha2 = "0.10"
 # The estate's encoding primitives: the byte cursor the SSH wire encoding is read over.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
+# The SSH wire encoding the key blobs, signature blobs and signed data are
+# made of: string, mpint (RFC 4251 section 5).
+ssh = { package = "xmip-core-library-ssh", git = "https://github.com/IlleNilsson/xmip-core-library-ssh", branch = "main" }
 
 [dev-dependencies]
 # The tests generate keys.

@@ -15,11 +15,12 @@
 //! refused: they narrow what the key may do, this gate cannot enforce them,
 //! and honoring the key while ignoring them would widen it silently.
 
-use crate::wire::{Ssh, padded};
 use authenticate::AuthenticateError;
+use codec::CodecError;
 use codec::cursor::Cursor;
 use rsa::signature::Verifier as _;
 use sha2::{Digest, Sha256};
+use ssh::SshRead;
 
 const ED25519: &str = "ssh-ed25519";
 const ECDSA_P256: &str = "ecdsa-sha2-nistp256";
@@ -66,7 +67,7 @@ impl AuthorizedKey {
         let comment = words.collect::<Vec<_>>().join(" ");
 
         let mut reader = Cursor::new(&blob);
-        let inner = reader.text(KEY_BLOB)?;
+        let inner = reader.text().map_err(malformed(KEY_BLOB))?;
         if inner != named {
             return Err(AuthenticateError::new(format!(
                 "the authorized key line says {named} and its blob says {inner}"
@@ -132,8 +133,8 @@ impl AuthorizedKey {
     /// gate verifies, the signature is malformed, or it does not verify.
     pub fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), AuthenticateError> {
         let mut reader = Cursor::new(signature);
-        let algorithm = reader.text("signature blob")?;
-        let raw = reader.string("signature blob")?;
+        let algorithm = reader.text().map_err(malformed("signature blob"))?;
+        let raw = reader.string().map_err(malformed("signature blob"))?;
 
         let holds = match (&self.material, algorithm) {
             (Material::Ed25519(key), ED25519) => ed25519_dalek::Signature::from_slice(raw)
@@ -141,8 +142,8 @@ impl AuthorizedKey {
             (Material::P256(key), ECDSA_P256) => {
                 let mut pair = Cursor::new(raw);
                 let (r, s) = (
-                    pair.mpint("ECDSA signature")?,
-                    pair.mpint("ECDSA signature")?,
+                    pair.mpint().map_err(malformed("ECDSA signature"))?,
+                    pair.mpint().map_err(malformed("ECDSA signature"))?,
                 );
                 match (padded::<32>(r), padded::<32>(s)) {
                     (Some(r), Some(s)) => p256::ecdsa::Signature::from_scalars(r, s)
@@ -187,9 +188,24 @@ impl AuthorizedKey {
 /// What a key blob is called in a refusal.
 const KEY_BLOB: &str = "key blob";
 
+/// A refusal of the SSH wire bytes called `what`, saying why.
+fn malformed(what: &'static str) -> impl Fn(CodecError) -> AuthenticateError {
+    move |error| AuthenticateError::new(format!("the {what} is malformed: {error}"))
+}
+
+/// Left-pad a big-endian integer to `WIDTH` bytes, as a scalar of that width
+/// is read; `None` where it is wider.
+fn padded<const WIDTH: usize>(integer: &[u8]) -> Option<[u8; WIDTH]> {
+    let mut fixed = [0u8; WIDTH];
+    let start = WIDTH.checked_sub(integer.len())?;
+    fixed[start..].copy_from_slice(integer);
+    Some(fixed)
+}
+
 fn ed25519(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
     let bytes: &[u8; 32] = reader
-        .string(KEY_BLOB)?
+        .string()
+        .map_err(malformed(KEY_BLOB))?
         .try_into()
         .map_err(|_| AuthenticateError::new("an Ed25519 key is thirty-two bytes"))?;
     ed25519_dalek::VerifyingKey::from_bytes(bytes)
@@ -198,19 +214,22 @@ fn ed25519(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
 }
 
 fn p256_point(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
-    let curve = reader.text(KEY_BLOB)?;
+    let curve = reader.text().map_err(malformed(KEY_BLOB))?;
     if curve != "nistp256" {
         return Err(AuthenticateError::new(format!(
             "the ECDSA key's curve is '{curve}' and this node verifies nistp256"
         )));
     }
-    p256::ecdsa::VerifyingKey::from_sec1_bytes(reader.string(KEY_BLOB)?)
+    p256::ecdsa::VerifyingKey::from_sec1_bytes(reader.string().map_err(malformed(KEY_BLOB))?)
         .map(Material::P256)
         .map_err(|_| AuthenticateError::new("the ECDSA key is not a point on nistp256"))
 }
 
 fn rsa_key(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
-    let (exponent, modulus) = (reader.mpint(KEY_BLOB)?, reader.mpint(KEY_BLOB)?);
+    let (exponent, modulus) = (
+        reader.mpint().map_err(malformed(KEY_BLOB))?,
+        reader.mpint().map_err(malformed(KEY_BLOB))?,
+    );
     rsa::RsaPublicKey::new(
         rsa::BigUint::from_bytes_be(modulus),
         rsa::BigUint::from_bytes_be(exponent),
@@ -222,15 +241,15 @@ fn rsa_key(reader: &mut Cursor<'_>) -> Result<Material, AuthenticateError> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::wire::tests::{put, put_mpint};
     use ed25519_dalek::Signer;
+    use ssh::SshWrite;
 
     /// An Ed25519 key pair from a fixed seed, and its `authorized_keys` line.
     pub(crate) fn ed25519_pair(seed: u8) -> (ed25519_dalek::SigningKey, String) {
         let signing = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         let mut blob = Vec::new();
-        put(&mut blob, ED25519.as_bytes());
-        put(&mut blob, signing.verifying_key().as_bytes());
+        blob.string(ED25519.as_bytes());
+        blob.string(signing.verifying_key().as_bytes());
         let line = format!(
             "{ED25519} {} partner-x@example",
             codec::base64::encode(&blob)
@@ -241,8 +260,8 @@ pub(crate) mod tests {
     /// A signature blob: the algorithm's name and the signature.
     pub(crate) fn signature_blob(algorithm: &str, raw: &[u8]) -> Vec<u8> {
         let mut blob = Vec::new();
-        put(&mut blob, algorithm.as_bytes());
-        put(&mut blob, raw);
+        blob.string(algorithm.as_bytes());
+        blob.string(raw);
         blob
     }
 
@@ -265,19 +284,16 @@ pub(crate) mod tests {
         use p256::ecdsa::signature::Signer as _;
         let signing = p256::ecdsa::SigningKey::from_slice(&[9; 32]).expect("a scalar");
         let mut blob = Vec::new();
-        put(&mut blob, ECDSA_P256.as_bytes());
-        put(&mut blob, b"nistp256");
-        put(
-            &mut blob,
-            signing.verifying_key().to_encoded_point(false).as_bytes(),
-        );
+        blob.string(ECDSA_P256.as_bytes());
+        blob.string(b"nistp256");
+        blob.string(signing.verifying_key().to_encoded_point(false).as_bytes());
         let key = AuthorizedKey::parse(&format!("{ECDSA_P256} {}", codec::base64::encode(&blob)))
             .expect("a key");
         let signature: p256::ecdsa::Signature = signing.sign(b"session");
         let (r, s) = signature.split_bytes();
         let mut pair = Vec::new();
-        put_mpint(&mut pair, &r);
-        put_mpint(&mut pair, &s);
+        pair.mpint(&r);
+        pair.mpint(&s);
 
         assert!(
             key.verify(b"session", &signature_blob(ECDSA_P256, &pair))
@@ -295,9 +311,9 @@ pub(crate) mod tests {
         use rsa::traits::PublicKeyParts;
         let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).expect("a key");
         let mut blob = Vec::new();
-        put(&mut blob, RSA.as_bytes());
-        put_mpint(&mut blob, &private.e().to_bytes_be());
-        put_mpint(&mut blob, &private.n().to_bytes_be());
+        blob.string(RSA.as_bytes());
+        blob.mpint(&private.e().to_bytes_be());
+        blob.mpint(&private.n().to_bytes_be());
         let key =
             AuthorizedKey::parse(&format!("{RSA} {}", codec::base64::encode(&blob))).expect("key");
         let signer = rsa::pkcs1v15::SigningKey::<Sha256>::new(private);
@@ -322,6 +338,22 @@ pub(crate) mod tests {
 
         assert!(options.message.contains("'restrict'"));
         assert!(other.message.contains("'ssh-dss'"));
+    }
+
+    #[test]
+    fn a_signature_blob_that_promises_more_than_there_is_is_refused_by_name() {
+        let (_, line) = ed25519_pair(7);
+        let key = AuthorizedKey::parse(&line).expect("a key");
+
+        let failure = key
+            .verify(b"session", &[0, 0, 0, 9, b'x'])
+            .expect_err("truncated");
+
+        assert!(
+            failure.message.contains("signature blob is malformed"),
+            "{}",
+            failure.message
+        );
     }
 
     #[test]
