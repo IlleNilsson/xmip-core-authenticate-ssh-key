@@ -30,7 +30,6 @@
 //! know; this gate cannot see the key exchange.
 
 pub mod key;
-pub mod wire;
 
 pub use key::AuthorizedKey;
 
@@ -40,7 +39,7 @@ use context::Verified;
 use context::property::SSH_USER;
 use identify::Presented;
 use identify::evidence;
-use wire::Ssh;
+use ssh::SshRead;
 use xcore::{Mechanism, mechanism};
 
 /// `SSH_MSG_USERAUTH_REQUEST`, RFC 4252 section 6.
@@ -62,18 +61,18 @@ impl<'a> Signed<'a> {
     /// The signed data read as RFC 4252 section 7, or `None` where the
     /// bytes are not of that shape and are an opaque challenge.
     fn read(data: &'a [u8]) -> Option<Self> {
-        let (mut reader, what) = (Cursor::new(data), "signed data");
-        reader.string(what).ok()?;
+        let mut reader = Cursor::new(data);
+        reader.string().ok()?;
         if reader.byte().ok()? != USERAUTH_REQUEST {
             return None;
         }
-        let user = reader.text(what).ok()?;
-        reader.string(what).ok()?;
-        if reader.text(what).ok()? != "publickey" || reader.byte().ok()? != 1 {
+        let user = reader.text().ok()?;
+        reader.string().ok()?;
+        if reader.text().ok()? != "publickey" || reader.byte().ok()? != 1 {
             return None;
         }
-        reader.string(what).ok()?;
-        let blob = reader.string(what).ok()?;
+        reader.string().ok()?;
+        let blob = reader.string().ok()?;
         reader.is_empty().then_some(Self { user, blob })
     }
 }
@@ -177,20 +176,21 @@ impl Authenticator for Verifier {
 mod tests {
     use super::*;
     use crate::key::tests::{ed25519_pair, signature_blob};
-    use crate::wire::tests::put;
+    use codec::writer::ByteWriter;
     use ed25519_dalek::Signer;
+    use ssh::SshWrite;
 
     /// What an SSH client signs for `user`: RFC 4252 section 7.
     fn signed_data(user: &str, blob: &[u8]) -> Vec<u8> {
         let mut data = Vec::new();
-        put(&mut data, &[0x5e; 32]);
-        data.push(USERAUTH_REQUEST);
-        put(&mut data, user.as_bytes());
-        put(&mut data, b"ssh-connection");
-        put(&mut data, b"publickey");
-        data.push(1);
-        put(&mut data, b"ssh-ed25519");
-        put(&mut data, blob);
+        data.string(&[0x5e; 32])
+            .byte(USERAUTH_REQUEST)
+            .string(user.as_bytes())
+            .string(b"ssh-connection")
+            .string(b"publickey")
+            .boolean(true)
+            .string(b"ssh-ed25519")
+            .string(blob);
         data
     }
 
