@@ -120,12 +120,6 @@ impl Authenticator for Verifier {
     }
 
     fn verify(&self, presented: &Presented) -> Result<Verified, AuthenticateError> {
-        let name = presented.mechanism.name();
-        if name != self.mechanism().name() {
-            return Err(AuthenticateError::new(format!(
-                "'{name}' was presented and this authenticator verifies ssh-key"
-            )));
-        }
         let signature = proof(presented, evidence::SSH_KEY_SIGNATURE)?;
         let session = proof(presented, evidence::SSH_KEY_SESSION)?;
 
@@ -148,13 +142,10 @@ impl Authenticator for Verifier {
                 "the key inside the signed data is not the key that was claimed",
             ));
         }
-        let user = signed.as_ref().map(|signed| signed.user).or_else(|| {
-            presented
-                .evidence
-                .iter()
-                .find(|(name, _)| name == SSH_USER)
-                .map(|(_, user)| user.as_str())
-        });
+        let user = signed
+            .as_ref()
+            .map(|signed| signed.user)
+            .or_else(|| presented.evidence(SSH_USER));
         if let Some(only) = key.user()
             && user != Some(only)
         {
@@ -296,19 +287,12 @@ mod tests {
     }
 
     #[test]
-    fn another_mechanism_and_each_missing_proof_are_refused_by_name() {
+    fn each_missing_proof_is_refused_by_name() {
         let (_, line) = ed25519_pair(7);
         let gate = Verifier::from_authorized_keys(&line).expect("keys");
-        let other = Presented::passed(mechanism::certificate(), "CN=x");
         let bare = Presented::passed(mechanism::ssh_key(), "SHA256:x");
         let half = bare.clone().with_proof(evidence::SSH_KEY_SIGNATURE, "c2ln");
 
-        assert!(
-            gate.verify(&other)
-                .expect_err("refused")
-                .message
-                .contains("'certificate' was presented")
-        );
         assert!(
             gate.verify(&bare)
                 .expect_err("refused")
