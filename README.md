@@ -10,10 +10,13 @@ over the signed session data with it: `ssh-ed25519`, `ecdsa-sha2-nistp256` and
 certificates and `sk-` keys by name, and it does not rebuild the RFC 4252
 signed data: the transport reports exactly what was signed.
 
-The blobs and the signed data are read with `xmip-core-library-ssh`, the one
-reader of SSH's wire types (RFC 4251 section 5) this gate and the SFTP
-transport share; until 2026-09-24 the gate carried a `wire` module of its own
-(ADR-0050, amendment 2026-09-25).
+The key blobs, the signature check (Ed25519 strictly), the fingerprint and
+the signed data are `xmip-core-library-ssh`'s, the one home of SSH this gate,
+the ssh-key identifier and the SFTP transport share; what is this gate's is
+the `authorized_keys` line, a key narrowed to one user, and the verdict.
+Until 2026-09-24 the gate carried a `wire` module of its own, and until
+2026-09-28 the key and signature check (ADR-0050, amendments 2026-09-25 and
+2026-09-28).
 
 ## Toolchain
 

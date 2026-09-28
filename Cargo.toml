@@ -31,22 +31,17 @@ authenticate = { package = "xmip-core-authenticate", git = "https://github.com/I
 identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
 context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main" }
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
-# The three key types RFC 8709, RFC 5656 and RFC 8332 give SSH: Ed25519,
-# ECDSA on nistp256, RSA with SHA-256. sha2 for the fingerprint, base64 for
-# the authorized_keys line and the proofs.
-ed25519-dalek = "2"
-p256 = { version = "0.13", features = ["ecdsa"] }
-rsa = { version = "0.9", features = ["sha2"] }
-sha2 = "0.10"
-# The estate's encoding primitives: the byte cursor the SSH wire encoding is read over.
+# The estate's encoding primitives: base64 for the authorized_keys line
+# and the proofs.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
-# The SSH wire encoding the key blobs, signature blobs and signed data are
-# made of: string, mpint (RFC 4251 section 5).
+# SSH's keys, signatures, fingerprints and signed data (RFC 4252 section 7):
+# the three key types RFC 8709, RFC 5656 and RFC 8332 give SSH, checked as
+# the SFTP transport checks its peers.
 ssh = { package = "xmip-core-library-ssh", git = "https://github.com/IlleNilsson/xmip-core-library-ssh", branch = "main" }
 
 [dev-dependencies]
-# The tests generate keys.
-rand = "0.8"
+# The tests sign with an Ed25519 key.
+ed25519-dalek = "2"
 
 [lints.rust]
 # forbid, not deny: a module has no business writing unsafe. The one exception
