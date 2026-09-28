@@ -10,14 +10,14 @@
 //! `authorized_keys` lines the node holds — a fingerprint no held key has is
 //! refused before any arithmetic — and verifies the signature blob over the
 //! session bytes with it: `ssh-ed25519`, `ecdsa-sha2-nistp256` and
-//! `rsa-sha2-256`, see [`key`]. Offline throughout (ADR-0045): the keys are
-//! configuration.
+//! `rsa-sha2-256`, see [`key`], each checked by `xmip-core-library-ssh`.
+//! Offline throughout (ADR-0045): the keys are configuration.
 //!
 //! The session bytes are verified exactly as the transport reported them;
 //! this gate does not rebuild what the client signed. Where they have the
 //! shape RFC 4252 section 7 gives the signed data — the session identifier,
-//! the user name, the service, `publickey`, the algorithm and the key blob —
-//! they are also read: the key blob inside must be the authorized key's, and
+//! the user name, the service, `publickey`, the algorithm and the key blob,
+//! read by `ssh::userauth::SignedData` — they are also read: the key blob inside must be the authorized key's, and
 //! the user name inside is the user the key must be authorized for. Where
 //! they are an opaque challenge, the user is what the transport reported as
 //! `ssh.user` evidence, if it reported one. A key narrowed to one user with
@@ -34,47 +34,18 @@ pub mod key;
 pub use key::AuthorizedKey;
 
 use authenticate::{AuthenticateError, Authenticator};
-use codec::cursor::Cursor;
 use context::Verified;
 use context::property::SSH_USER;
 use identify::Presented;
 use identify::evidence;
-use ssh::SshRead;
+use ssh::Fingerprint;
+use ssh::userauth::SignedData;
 use xcore::{Mechanism, mechanism};
-
-/// `SSH_MSG_USERAUTH_REQUEST`, RFC 4252 section 6.
-const USERAUTH_REQUEST: u8 = 50;
 
 /// The ssh-key authenticator: the keys the node holds as authorized.
 #[derive(Clone, Debug)]
 pub struct Verifier {
     keys: Vec<AuthorizedKey>,
-}
-
-/// What RFC 4252 signed data says about itself.
-struct Signed<'a> {
-    user: &'a str,
-    blob: &'a [u8],
-}
-
-impl<'a> Signed<'a> {
-    /// The signed data read as RFC 4252 section 7, or `None` where the
-    /// bytes are not of that shape and are an opaque challenge.
-    fn read(data: &'a [u8]) -> Option<Self> {
-        let mut reader = Cursor::new(data);
-        reader.string().ok()?;
-        if reader.byte().ok()? != USERAUTH_REQUEST {
-            return None;
-        }
-        let user = reader.text().ok()?;
-        reader.string().ok()?;
-        if reader.text().ok()? != "publickey" || reader.byte().ok()? != 1 {
-            return None;
-        }
-        reader.string().ok()?;
-        let blob = reader.string().ok()?;
-        reader.is_empty().then_some(Self { user, blob })
-    }
 }
 
 impl Verifier {
@@ -123,18 +94,20 @@ impl Authenticator for Verifier {
         let signature = proof(presented, evidence::SSH_KEY_SIGNATURE)?;
         let session = proof(presented, evidence::SSH_KEY_SESSION)?;
 
-        let claimed = presented.value.trim().trim_end_matches('=');
+        let claimed = presented.value.trim();
+        let print = Fingerprint::parse(claimed)
+            .map_err(|refused| AuthenticateError::new(refused.message))?;
         let key = self
             .keys
             .iter()
-            .find(|key| key.fingerprint() == claimed)
+            .find(|key| key.fingerprint() == print)
             .ok_or_else(|| {
                 AuthenticateError::new(format!(
                     "the node holds no authorized key with the fingerprint {claimed}"
                 ))
             })?;
 
-        let signed = Signed::read(&session);
+        let signed = SignedData::read(&session);
         if let Some(signed) = &signed
             && signed.blob != key.blob()
         {
@@ -166,27 +139,16 @@ impl Authenticator for Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::tests::{ed25519_pair, signature_blob};
-    use codec::writer::ByteWriter;
-    use ed25519_dalek::Signer;
-    use ssh::SshWrite;
+    use crate::key::tests::ed25519_pair;
+    use ssh::key::{ED25519, sign_ed25519};
 
     /// What an SSH client signs for `user`: RFC 4252 section 7.
     fn signed_data(user: &str, blob: &[u8]) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.string(&[0x5e; 32])
-            .byte(USERAUTH_REQUEST)
-            .string(user.as_bytes())
-            .string(b"ssh-connection")
-            .string(b"publickey")
-            .boolean(true)
-            .string(b"ssh-ed25519")
-            .string(blob);
-        data
+        ssh::userauth::signed_data(&[0x5e; 32], user, ED25519, blob)
     }
 
     fn presented(fingerprint: &str, data: &[u8], signing: &ed25519_dalek::SigningKey) -> Presented {
-        let signature = signature_blob("ssh-ed25519", &signing.sign(data).to_bytes());
+        let signature = sign_ed25519(signing, data);
         Presented::passed(mechanism::ssh_key(), fingerprint)
             .with_proof(
                 evidence::SSH_KEY_SIGNATURE,
@@ -203,7 +165,11 @@ mod tests {
         let key = AuthorizedKey::parse(&line).expect("a key");
 
         let verified = gate
-            .verify(&presented(&key.fingerprint(), b"a challenge", &signing))
+            .verify(&presented(
+                &key.fingerprint().to_string(),
+                b"a challenge",
+                &signing,
+            ))
             .expect("proven");
 
         assert_eq!(verified, Verified::Proven);
@@ -214,7 +180,10 @@ mod tests {
         let (_, held) = ed25519_pair(7);
         let (stranger, line) = ed25519_pair(8);
         let gate = Verifier::from_authorized_keys(&held).expect("keys");
-        let fingerprint = AuthorizedKey::parse(&line).expect("a key").fingerprint();
+        let fingerprint = AuthorizedKey::parse(&line)
+            .expect("a key")
+            .fingerprint()
+            .to_string();
 
         let failure = gate
             .verify(&presented(&fingerprint, b"a challenge", &stranger))
@@ -229,7 +198,10 @@ mod tests {
         let (_, line) = ed25519_pair(7);
         let (impostor, _) = ed25519_pair(8);
         let gate = Verifier::from_authorized_keys(&line).expect("keys");
-        let fingerprint = AuthorizedKey::parse(&line).expect("a key").fingerprint();
+        let fingerprint = AuthorizedKey::parse(&line)
+            .expect("a key")
+            .fingerprint()
+            .to_string();
 
         let failure = gate
             .verify(&presented(&fingerprint, b"a challenge", &impostor))
@@ -244,7 +216,7 @@ mod tests {
         let key = AuthorizedKey::parse(&line)
             .expect("a key")
             .for_user("orders");
-        let fingerprint = key.fingerprint();
+        let fingerprint = key.fingerprint().to_string();
         let (ours, theirs) = (
             signed_data("orders", key.blob()),
             signed_data("root", key.blob()),
@@ -273,7 +245,10 @@ mod tests {
         let (_, other) = ed25519_pair(8);
         let other = AuthorizedKey::parse(&other).expect("a key");
         let gate = Verifier::from_authorized_keys(&line).expect("keys");
-        let fingerprint = AuthorizedKey::parse(&line).expect("a key").fingerprint();
+        let fingerprint = AuthorizedKey::parse(&line)
+            .expect("a key")
+            .fingerprint()
+            .to_string();
 
         let failure = gate
             .verify(&presented(
