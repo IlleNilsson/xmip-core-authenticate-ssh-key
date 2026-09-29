@@ -118,10 +118,7 @@ pub(crate) mod tests {
     pub(crate) fn ed25519_pair(seed: u8) -> (ed25519_dalek::SigningKey, String) {
         let signing = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
         let blob = PublicKey::ed25519(&signing.verifying_key()).blob().to_vec();
-        let line = format!(
-            "{ED25519} {} partner-x@example",
-            codec::base64::encode(&blob)
-        );
+        let line = format!("{ED25519} {} party-x@example", codec::base64::encode(&blob));
         (signing, line)
     }
 
@@ -131,7 +128,7 @@ pub(crate) mod tests {
         let key = AuthorizedKey::parse(&line).expect("a key");
         let signature = sign_ed25519(&signing, b"session");
 
-        assert_eq!(key.comment(), "partner-x@example");
+        assert_eq!(key.comment(), "party-x@example");
         assert!(key.fingerprint().to_string().starts_with("SHA256:"));
         assert!(key.verify(b"session", &signature).is_ok());
         let failure = key.verify(b"another", &signature).expect_err("refused");

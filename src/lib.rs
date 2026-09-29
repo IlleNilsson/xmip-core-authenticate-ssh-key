@@ -160,8 +160,7 @@ mod tests {
     #[test]
     fn a_signature_by_an_authorized_key_over_the_session_is_proven() {
         let (signing, line) = ed25519_pair(7);
-        let gate =
-            Verifier::from_authorized_keys(&format!("# partners\n\n{line}\n")).expect("keys");
+        let gate = Verifier::from_authorized_keys(&format!("# parties\n\n{line}\n")).expect("keys");
         let key = AuthorizedKey::parse(&line).expect("a key");
 
         let verified = gate
