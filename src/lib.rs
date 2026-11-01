@@ -28,6 +28,12 @@
 //! certificates and `sk-` security-key types, and `authorized_keys` options.
 //! That the session identifier is this connection's is the transport's to
 //! know; this gate cannot see the key exchange.
+//!
+//! A server that logs a client in by key — Xmip's SSH server, the far ends
+//! — verifies the signature itself and asks this gate only whether the key
+//! is the user's ([`Verifier::admits`]), handed it as its check
+//! (`net::login::Check`): the same lookup and the same narrowing to one
+//! user as [`Authenticator::verify`].
 
 pub mod key;
 
@@ -75,6 +81,40 @@ impl Verifier {
         }
         Ok(Self::new(keys))
     }
+
+    /// Whether the public key `key`, its blob as it travels on the wire, is
+    /// one this gate holds as authorized for `user`: this gate's own
+    /// verdict on a key whose signature the server already verified. What
+    /// a server that logs a client in is handed as its check
+    /// (`net::login::Check`) — Xmip's SSH server links no authenticator —
+    /// so a far end asks of a key what a Receive Location's gate asks.
+    #[must_use]
+    pub fn admits(&self, user: &str, key: &[u8]) -> bool {
+        ssh::key::PublicKey::parse(key).is_ok_and(|presented| {
+            self.held(presented.fingerprint())
+                .is_some_and(|held| held.blob() == key && narrowed(held, Some(user)).is_ok())
+        })
+    }
+
+    /// The authorized key with `print` as its fingerprint, if this gate
+    /// holds one.
+    fn held(&self, print: Fingerprint) -> Option<&AuthorizedKey> {
+        self.keys.iter().find(|key| key.fingerprint() == print)
+    }
+}
+
+/// Refused where `key` is narrowed to one user and `user` is not that one.
+fn narrowed(key: &AuthorizedKey, user: Option<&str>) -> Result<(), AuthenticateError> {
+    match key.user() {
+        Some(only) if user != Some(only) => Err(AuthenticateError::new(match user {
+            Some(user) => format!("the key is authorized for '{only}' and not for '{user}'"),
+            None => format!(
+                "the key is authorized for '{only}' only, and neither the signed data \
+                 nor {SSH_USER} evidence names the user"
+            ),
+        })),
+        _ => Ok(()),
+    }
 }
 
 fn proof(presented: &Presented, name: &str) -> Result<Vec<u8>, AuthenticateError> {
@@ -97,15 +137,11 @@ impl Authenticator for Verifier {
         let claimed = presented.value.trim();
         let print = Fingerprint::parse(claimed)
             .map_err(|refused| AuthenticateError::new(refused.message))?;
-        let key = self
-            .keys
-            .iter()
-            .find(|key| key.fingerprint() == print)
-            .ok_or_else(|| {
-                AuthenticateError::new(format!(
-                    "the node holds no authorized key with the fingerprint {claimed}"
-                ))
-            })?;
+        let key = self.held(print).ok_or_else(|| {
+            AuthenticateError::new(format!(
+                "the node holds no authorized key with the fingerprint {claimed}"
+            ))
+        })?;
 
         let signed = SignedData::read(&session);
         if let Some(signed) = &signed
@@ -119,17 +155,7 @@ impl Authenticator for Verifier {
             .as_ref()
             .map(|signed| signed.user)
             .or_else(|| presented.evidence(SSH_USER));
-        if let Some(only) = key.user()
-            && user != Some(only)
-        {
-            return Err(AuthenticateError::new(match user {
-                Some(user) => format!("the key is authorized for '{only}' and not for '{user}'"),
-                None => format!(
-                    "the key is authorized for '{only}' only, and neither the signed data \
-                     nor {SSH_USER} evidence names the user"
-                ),
-            }));
-        }
+        narrowed(key, user)?;
 
         key.verify(&session, &signature)?;
         Ok(Verified::Proven)
@@ -236,6 +262,25 @@ mod tests {
         assert!(other.message.contains("not for 'root'"));
         assert!(unnamed.message.contains("ssh.user"));
         assert_eq!(gate.verify(&reported).expect("proven"), Verified::Proven);
+    }
+
+    #[test]
+    fn a_login_is_admitted_only_with_a_held_key_for_its_own_user() {
+        let (_, line) = ed25519_pair(7);
+        let (_, stranger) = ed25519_pair(8);
+        let key = AuthorizedKey::parse(&line).expect("a key");
+        let blob = key.blob().to_vec();
+        let stranger = AuthorizedKey::parse(&stranger).expect("a key");
+        let gate = Verifier::new(vec![key.for_user("orders")]);
+
+        assert!(gate.admits("orders", &blob));
+        assert!(!gate.admits("payroll", &blob), "another user");
+        assert!(!gate.admits("orders", stranger.blob()), "a key not held");
+        assert!(!gate.admits("orders", b"not a key"), "no key at all");
+        assert!(
+            !Verifier::new(Vec::new()).admits("orders", &blob),
+            "none held"
+        );
     }
 
     #[test]

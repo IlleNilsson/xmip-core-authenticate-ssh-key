@@ -18,6 +18,18 @@ Until 2026-09-24 the gate carried a `wire` module of its own, and until
 2026-09-28 the key and signature check (ADR-0050, amendments 2026-09-25 and
 2026-09-28).
 
+## A server's check
+
+Xmip's SSH server links no authenticator — identity presentation is not a
+transport's (`architecture.toml`) — and is handed the check it asks of a
+login (`net::login::Check`). Where a client signed with a key, the server
+verifies the signature itself and asks the check whether the key is the
+user's; `Verifier::admits(user, key)` is this gate's answer, the same lookup
+by fingerprint and the same narrowing to one user as `verify`. Until
+2026-11-01 any key whose signature verified was admitted, so the SFTP far
+end chose a directory by the user a key merely named (open problem 59;
+ADR-0019, amendment 2026-11-01).
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
