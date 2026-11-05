@@ -21,7 +21,7 @@ Until 2026-09-24 the gate carried a `wire` module of its own, and until
 ## A server's check
 
 Xmip's SSH server links no authenticator — identity presentation is not a
-transport's (`architecture.toml`) — and is handed the check it asks of a
+transport's (`architecture.xmip`) — and is handed the check it asks of a
 login (`net::login::Check`). Where a client signed with a key, the server
 verifies the signature itself and asks the check whether the key is the
 user's; `Verifier::admits(user, key)` is this gate's answer, the same lookup
