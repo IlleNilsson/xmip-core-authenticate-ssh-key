@@ -15,7 +15,7 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/IlleNilsson/xmip-core-authenticate-ssh-key"
-description = "Authenticate by ssh-key: verifies a signature over a challenge by the presented key."
+description = "Authenticate by ssh-key: verifies the presented key's signature over RFC 4252 signed data."
 publish = false
 
 [lib]

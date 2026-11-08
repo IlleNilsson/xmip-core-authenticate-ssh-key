@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-//! Authenticate by ssh-key: verifies a signature over a challenge by the
-//! presented key.
+//! Authenticate by ssh-key: verifies the presented key's signature over
+//! RFC 4252 signed data.
 //!
 //! The first gate presented the fingerprint of the public key the peer
 //! offered, with the signature the peer made riding as the
@@ -14,14 +14,14 @@
 //! Offline throughout (ADR-0045): the keys are configuration.
 //!
 //! The session bytes are verified exactly as the transport reported them;
-//! this gate does not rebuild what the client signed. Where they have the
+//! this gate does not rebuild what the client signed. They must have the
 //! shape RFC 4252 section 7 gives the signed data — the session identifier,
 //! the user name, the service, `publickey`, the algorithm and the key blob,
-//! read by `ssh::userauth::SignedData` — they are also read: the key blob inside must be the authorized key's, and
-//! the user name inside is the user the key must be authorized for. Where
-//! they are an opaque challenge, the user is what the transport reported as
-//! `ssh.user` evidence, if it reported one. A key narrowed to one user with
-//! [`AuthorizedKey::for_user`] is refused where neither names that user.
+//! read by `ssh::userauth::SignedData` — and anything else is refused: a
+//! signature over opaque bytes proves only that the key signed them, once,
+//! somewhere. The key blob inside must be the authorized key's, and the user
+//! name inside is the user the key must be authorized for; a key narrowed to
+//! one user with [`AuthorizedKey::for_user`] is refused for any other.
 //!
 //! Not verified, and refused by name: `ssh-rsa` signatures (SHA-1),
 //! `rsa-sha2-512`, the nistp384 and nistp521 curves, `ssh-dss`, OpenSSH
@@ -41,7 +41,6 @@ pub use key::AuthorizedKey;
 
 use authenticate::{AuthenticateError, Authenticator};
 use context::Verified;
-use context::property::SSH_USER;
 use identify::Presented;
 use identify::evidence;
 use ssh::Fingerprint;
@@ -92,7 +91,7 @@ impl Verifier {
     pub fn admits(&self, user: &str, key: &[u8]) -> bool {
         ssh::key::PublicKey::parse(key).is_ok_and(|presented| {
             self.held(presented.fingerprint())
-                .is_some_and(|held| held.blob() == key && narrowed(held, Some(user)).is_ok())
+                .is_some_and(|held| held.blob() == key && narrowed(held, user).is_ok())
         })
     }
 
@@ -104,15 +103,11 @@ impl Verifier {
 }
 
 /// Refused where `key` is narrowed to one user and `user` is not that one.
-fn narrowed(key: &AuthorizedKey, user: Option<&str>) -> Result<(), AuthenticateError> {
+fn narrowed(key: &AuthorizedKey, user: &str) -> Result<(), AuthenticateError> {
     match key.user() {
-        Some(only) if user != Some(only) => Err(AuthenticateError::new(match user {
-            Some(user) => format!("the key is authorized for '{only}' and not for '{user}'"),
-            None => format!(
-                "the key is authorized for '{only}' only, and neither the signed data \
-                 nor {SSH_USER} evidence names the user"
-            ),
-        })),
+        Some(only) if user != only => Err(AuthenticateError::new(format!(
+            "the key is authorized for '{only}' and not for '{user}'"
+        ))),
         _ => Ok(()),
     }
 }
@@ -143,19 +138,18 @@ impl Authenticator for Verifier {
             ))
         })?;
 
-        let signed = SignedData::read(&session);
-        if let Some(signed) = &signed
-            && signed.blob != key.blob()
-        {
+        let signed = SignedData::read(&session).ok_or_else(|| {
+            AuthenticateError::new(
+                "the signed data is not RFC 4252 section 7's: a signature over anything else \
+                 proves only that the key signed it, once, somewhere",
+            )
+        })?;
+        if signed.blob != key.blob() {
             return Err(AuthenticateError::new(
                 "the key inside the signed data is not the key that was claimed",
             ));
         }
-        let user = signed
-            .as_ref()
-            .map(|signed| signed.user)
-            .or_else(|| presented.evidence(SSH_USER));
-        narrowed(key, user)?;
+        narrowed(key, signed.user)?;
 
         key.verify(&session, &signature)?;
         Ok(Verified::Proven)
@@ -192,12 +186,32 @@ mod tests {
         let verified = gate
             .verify(&presented(
                 &key.fingerprint().to_string(),
-                b"a challenge",
+                &signed_data("orders", key.blob()),
                 &signing,
             ))
             .expect("proven");
 
         assert_eq!(verified, Verified::Proven);
+    }
+
+    #[test]
+    fn an_opaque_challenge_signed_by_an_authorized_key_is_refused() {
+        // A signature over bytes that are not RFC 4252's signed data proves
+        // the key signed them somewhere, not that this session's client
+        // holds it: whoever kept the pair could present it anywhere.
+        let (signing, line) = ed25519_pair(7);
+        let gate = Verifier::from_authorized_keys(&line).expect("keys");
+        let key = AuthorizedKey::parse(&line).expect("a key");
+
+        let refused = gate
+            .verify(&presented(
+                &key.fingerprint().to_string(),
+                b"a challenge",
+                &signing,
+            ))
+            .expect_err("refused");
+
+        assert!(refused.message.contains("RFC 4252 section 7"), "{refused}");
     }
 
     #[test]
@@ -210,8 +224,9 @@ mod tests {
             .fingerprint()
             .to_string();
 
+        let data = signed_data("orders", AuthorizedKey::parse(&line).expect("a key").blob());
         let failure = gate
-            .verify(&presented(&fingerprint, b"a challenge", &stranger))
+            .verify(&presented(&fingerprint, &data, &stranger))
             .expect_err("refused");
 
         assert!(failure.message.contains("no authorized key"));
@@ -223,13 +238,15 @@ mod tests {
         let (_, line) = ed25519_pair(7);
         let (impostor, _) = ed25519_pair(8);
         let gate = Verifier::from_authorized_keys(&line).expect("keys");
-        let fingerprint = AuthorizedKey::parse(&line)
-            .expect("a key")
-            .fingerprint()
-            .to_string();
+        let held = AuthorizedKey::parse(&line).expect("a key");
+        let fingerprint = held.fingerprint().to_string();
 
         let failure = gate
-            .verify(&presented(&fingerprint, b"a challenge", &impostor))
+            .verify(&presented(
+                &fingerprint,
+                &signed_data("orders", held.blob()),
+                &impostor,
+            ))
             .expect_err("refused");
 
         assert!(failure.message.contains("does not verify"));
@@ -252,16 +269,14 @@ mod tests {
         let other = gate
             .verify(&presented(&fingerprint, &theirs, &signing))
             .expect_err("refused");
-        let unnamed = gate
-            .verify(&presented(&fingerprint, b"a challenge", &signing))
-            .expect_err("refused");
-        let reported =
-            presented(&fingerprint, b"a challenge", &signing).with_evidence(SSH_USER, "orders");
+        // The transport's word for the user does not stand in for the
+        // signed data's.
+        let reported = presented(&fingerprint, b"a challenge", &signing)
+            .with_evidence(context::property::SSH_USER, "orders");
 
         assert_eq!(proven.expect("proven"), Verified::Proven);
         assert!(other.message.contains("not for 'root'"));
-        assert!(unnamed.message.contains("ssh.user"));
-        assert_eq!(gate.verify(&reported).expect("proven"), Verified::Proven);
+        assert!(gate.verify(&reported).is_err(), "an opaque challenge");
     }
 
     #[test]
