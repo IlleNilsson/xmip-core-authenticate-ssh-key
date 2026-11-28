@@ -14,19 +14,19 @@ path = "src/lib.rs"
 # A Technology depends on its parent Capability, never the reverse
 # (repository-model.md): authenticate for the trait and Presented, context
 # for Verified, xcore for the mechanism catalog.
-authenticate = { package = "xmip-core-authenticate", git = "https://github.com/IlleNilsson/xmip-core-authenticate", branch = "main" }
+authenticate = { workspace = true }
 # identify for the names a claim carries across the gates (identify::evidence),
 # declared once for the first gate that writes them and this one that reads.
-identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
-context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main" }
-xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
+identify = { workspace = true }
+context = { workspace = true }
+xcore = { workspace = true }
 # The estate's encoding primitives: base64 for the authorized_keys line
 # and the proofs.
-codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
+codec = { workspace = true }
 # SSH's keys, signatures, fingerprints and signed data (RFC 4252 section 7):
 # the three key types RFC 8709, RFC 5656 and RFC 8332 give SSH, checked as
 # the SFTP transport checks its peers.
-ssh = { package = "xmip-core-library-ssh", git = "https://github.com/IlleNilsson/xmip-core-library-ssh", branch = "main" }
+ssh = { workspace = true }
 
 [dev-dependencies]
 # The tests sign with an Ed25519 key.
